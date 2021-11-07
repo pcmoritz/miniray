@@ -21,12 +21,10 @@ cdef c_string call_actor_method(void** actor, const c_string& method_name, const
                 python_class, args, kwargs = cloudpickle.loads(arg_data)
                 result = python_class(*args, **kwargs)
                 Py_INCREF(result)
-                # current_actor = 
                 (<PyObject**> actor)[0] = <PyObject*> result
             else:
                 current_actor = (<PyObject**> actor)[0]
                 args, kwargs = cloudpickle.loads(arg_data)
-                # print("method_name", method_name)
                 actor_object = <object> current_actor
                 result = getattr(actor_object, method_name.decode())(*args, **kwargs)
         except Exception as err:
@@ -35,31 +33,60 @@ cdef c_string call_actor_method(void** actor, const c_string& method_name, const
         return cloudpickle.dumps(result)
 
 cdef extern from "src/ray/ray.h" nogil:
-    cdef cppclass CActorID" ActorID":
+    cdef cppclass CFuture" Future":
         pass
+
+    cdef cppclass CActor" Actor":
+        shared_ptr[CFuture] Submit(c_string& method_name, c_string& arg_data)
 
     cdef cppclass CContext" Context":
         CContext()
-        CActorID StartActor(c_string (void**, const c_string &, const c_string &, c_bool* error_happened) nogil, const c_string& init_args_data)
-        void Submit(CActorID actor_id, c_string& method_name, c_string& arg_data)
+        shared_ptr[CActor] MakeActor(c_string (void**, c_string&, const c_string &, c_bool* error_happened) nogil, c_string init_args_data)
+        c_string Get(const shared_ptr[CFuture]& future)
+
+cdef class Future:
+    cdef:
+        shared_ptr[CFuture] future
+
+cdef make_future(shared_ptr[CFuture] future):
+    cdef Future result = Future()
+    result.future = future
+    return result
+
+cdef class Actor:
+    cdef:
+        shared_ptr[CActor] actor
+
+    def submit(self, method_name, c_string c_args_data):
+        cdef c_string c_method_name = method_name
+        cdef shared_ptr[CFuture] future
+        with nogil:
+             future = self.actor.get().Submit(c_method_name, c_args_data)
+        return make_future(future)
+
+cdef make_actor(shared_ptr[CActor] actor):
+    cdef Actor result = Actor()
+    result.actor = actor
+    return result
 
 cdef class Context:
     cdef:
         shared_ptr[CContext] context
 
-    def start_actor(self, python_class, args, kwargs):
+    def make_actor(self, python_class, args, kwargs):
         init_args_data = cloudpickle.dumps([python_class, args, kwargs])
         cdef c_string c_init_args_data = init_args_data
-        cdef CActorID result
+        cdef shared_ptr[CActor] actor
         with nogil:
-            result = self.context.get().StartActor(call_actor_method, c_init_args_data)
-        return <int64_t>(result)
+            actor = self.context.get().MakeActor(call_actor_method, c_init_args_data)
+        return make_actor(actor)
 
-    def submit(self, actor_id, method_name, c_string c_args_data):
-        cdef c_string c_method_name = method_name
-        cdef int64_t c_actor_id = actor_id
+    def get(self, Future future):
+        cdef c_string data
         with nogil:
-             self.context.get().Submit(<CActorID>c_actor_id, c_method_name, c_args_data)
+            data = self.context.get().Get(future.future)
+        return cloudpickle.loads(data)
+
 
 def context():
     cdef Context context = Context()
