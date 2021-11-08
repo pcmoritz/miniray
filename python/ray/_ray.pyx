@@ -12,19 +12,20 @@ from libcpp.memory cimport shared_ptr
 import cloudpickle
 
 cdef class FastPickler:
-    cdef object result
+    cdef bytes result
     cdef object pickler
 
     def __init__(self):
         self.result = b""
         self.pickler = cloudpickle.CloudPickler(self, protocol=5)
 
-    def dumps(self, data):
-        self.pickler.dump(data)
-        return self.result
-
     def write(self, data):
         self.result = data
+
+def dumps(data):
+    cdef FastPickler pickler = FastPickler()
+    pickler.pickler.dump(data)
+    return pickler.result
 
 
 cdef c_string actor_method(Actor actor, const c_string& method_name, const c_string& arg_data, c_bool* error_happened):
@@ -36,7 +37,7 @@ cdef c_string actor_method(Actor actor, const c_string& method_name, const c_str
         else:
             args, kwargs = cloudpickle.loads(arg_data)
             result = getattr(actor.instance, method_name.decode())(*args, **kwargs)
-            return actor.pickler.dumps(result)
+            return dumps(result)
     except Exception as err:
         error_happened[0] = True
         return cloudpickle.dumps(err)
@@ -70,25 +71,21 @@ cdef class Actor:
     cdef:
         shared_ptr[CActor] actor
         object instance
-        FastPickler pickler
 
 cdef class ActorHandle:
     cdef:
         shared_ptr[CActor] actor
-        FastPickler pickler
 
-    def submit(self, method_name, args, kwargs):
-        cdef c_string c_method_name = method_name
-        cdef c_string c_args_data = self.pickler.dumps([args, kwargs])
+    def submit(self, c_string method_name, args, kwargs):
+        cdef c_string args_data = dumps([args, kwargs])
         cdef shared_ptr[CFuture] future
         with nogil:
-             future = self.actor.get().Submit(c_method_name, c_args_data)
+             future = self.actor.get().Submit(method_name, args_data)
         return make_future(future)
 
 cdef make_actor_handle(shared_ptr[CActor] actor):
     cdef ActorHandle result = ActorHandle()
     result.actor = actor
-    result.pickler = FastPickler()
     return result
 
 cdef class Context:
@@ -100,7 +97,6 @@ cdef class Context:
         init_args_data = cloudpickle.dumps([python_class, args, kwargs])
         cdef c_string c_init_args_data = init_args_data
         cdef Actor actor = Actor()
-        actor.pickler = FastPickler()
         with nogil:
             actor.actor = self.context.get().MakeActor(<void*>actor, call_actor_method, c_init_args_data)
         self.actors.append(actor)
