@@ -9,28 +9,41 @@ from libc.stdint cimport int64_t
 from libcpp.string cimport string as c_string
 from libcpp.memory cimport shared_ptr
 
-from cpython.ref cimport PyObject, Py_INCREF
-
 import cloudpickle
 
-cdef c_string call_actor_method(void** actor, const c_string& method_name, const c_string& arg_data, c_bool* error_happened) nogil:
-   cdef PyObject* current_actor
+cdef class FastPickler:
+    cdef object result
+    cdef object pickler
+
+    def __init__(self):
+        self.result = b""
+        self.pickler = cloudpickle.CloudPickler(self, protocol=5)
+
+    def dumps(self, data):
+        self.pickler.dump(data)
+        return self.result
+
+    def write(self, data):
+        self.result = data
+
+
+cdef c_string actor_method(Actor actor, const c_string& method_name, const c_string& arg_data, c_bool* error_happened):
+    try:
+        if method_name == b"__init__":
+            python_class, args, kwargs = cloudpickle.loads(arg_data)
+            actor.instance = python_class(*args, **kwargs)
+            return b""
+        else:
+            args, kwargs = cloudpickle.loads(arg_data)
+            result = getattr(actor.instance, method_name.decode())(*args, **kwargs)
+            return actor.pickler.dumps(result)
+    except Exception as err:
+        error_happened[0] = True
+        return cloudpickle.dumps(err)
+
+cdef c_string call_actor_method(void* actor, const c_string& method_name, const c_string& arg_data, c_bool* error_happened) nogil:
    with gil:
-        try:
-            if method_name == b"__init__":
-                python_class, args, kwargs = cloudpickle.loads(arg_data)
-                result = python_class(*args, **kwargs)
-                Py_INCREF(result)
-                (<PyObject**> actor)[0] = <PyObject*> result
-            else:
-                current_actor = (<PyObject**> actor)[0]
-                args, kwargs = cloudpickle.loads(arg_data)
-                actor_object = <object> current_actor
-                result = getattr(actor_object, method_name.decode())(*args, **kwargs)
-        except Exception as err:
-            error_happened[0] = True
-            return cloudpickle.dumps(err)
-        return cloudpickle.dumps(result)
+        return actor_method(<Actor>actor, method_name, arg_data, error_happened)
 
 cdef extern from "src/ray/ray.h" nogil:
     cdef cppclass CFuture" Future":
@@ -41,7 +54,7 @@ cdef extern from "src/ray/ray.h" nogil:
 
     cdef cppclass CContext" Context":
         CContext()
-        shared_ptr[CActor] MakeActor(c_string (void**, c_string&, const c_string &, c_bool* error_happened) nogil, c_string init_args_data)
+        shared_ptr[CActor] MakeActor(void*, c_string (void*, c_string&, const c_string &, c_bool* error_happened) nogil, c_string init_args_data)
         c_string Get(const shared_ptr[CFuture]& future)
 
 cdef class Future:
@@ -56,30 +69,42 @@ cdef make_future(shared_ptr[CFuture] future):
 cdef class Actor:
     cdef:
         shared_ptr[CActor] actor
+        object instance
+        FastPickler pickler
 
-    def submit(self, method_name, c_string c_args_data):
+cdef class ActorHandle:
+    cdef:
+        shared_ptr[CActor] actor
+        FastPickler pickler
+
+    def submit(self, method_name, args, kwargs):
         cdef c_string c_method_name = method_name
+        cdef c_string c_args_data = self.pickler.dumps([args, kwargs])
         cdef shared_ptr[CFuture] future
         with nogil:
              future = self.actor.get().Submit(c_method_name, c_args_data)
         return make_future(future)
 
-cdef make_actor(shared_ptr[CActor] actor):
-    cdef Actor result = Actor()
+cdef make_actor_handle(shared_ptr[CActor] actor):
+    cdef ActorHandle result = ActorHandle()
     result.actor = actor
+    result.pickler = FastPickler()
     return result
 
 cdef class Context:
     cdef:
         shared_ptr[CContext] context
+        object actors
 
     def make_actor(self, python_class, args, kwargs):
         init_args_data = cloudpickle.dumps([python_class, args, kwargs])
         cdef c_string c_init_args_data = init_args_data
-        cdef shared_ptr[CActor] actor
+        cdef Actor actor = Actor()
+        actor.pickler = FastPickler()
         with nogil:
-            actor = self.context.get().MakeActor(call_actor_method, c_init_args_data)
-        return make_actor(actor)
+            actor.actor = self.context.get().MakeActor(<void*>actor, call_actor_method, c_init_args_data)
+        self.actors.append(actor)
+        return make_actor_handle(actor.actor)
 
     def get(self, Future future):
         cdef c_string data
@@ -91,4 +116,5 @@ cdef class Context:
 def context():
     cdef Context context = Context()
     context.context.reset(new CContext())
+    context.actors = []
     return context

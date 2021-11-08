@@ -1,5 +1,7 @@
 import inspect
 
+import _ray
+
 class ActorHandle:
     def __init__(self, actor_id):
         self._ray_actor_id = actor_id

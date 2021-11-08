@@ -4,8 +4,9 @@
 
 #include "util.h"
 
-void Actor::Start(ActorExecutor executor) {
+void Actor::Start(void* actor, ActorExecutor executor) {
   absl::MutexLock lock(&mu_);
+  actor_ = actor;
   thread_ = std::thread([this, executor] {
     bool shutdown = false;
     while (!shutdown) {
@@ -38,7 +39,7 @@ bool Actor::ExecuteTasks(const ActorExecutor& executor) {
       return true;
     }
     bool error_happened = false;
-    std::string result = executor(&actor_, task.method_name, task.args_data, &error_happened);
+    std::string result = executor(actor_, task.method_name, task.args_data, &error_happened);
     task.result->set_ready(std::move(result));
   }
   return false;
@@ -52,12 +53,12 @@ Actor::~Actor() {
   thread_.join();
 }
 
-std::shared_ptr<Actor> Context::MakeActor(ActorExecutor executor, std::string init_args_data) {
-  auto actor = std::make_shared<Actor>();
+std::shared_ptr<Actor> Context::MakeActor(void* actor, ActorExecutor executor, std::string init_args_data) {
+  auto result = std::make_shared<Actor>();
   std::string init_method_name = "__init__";
-  actor->Submit(init_method_name, init_args_data);
-  actor->Start(executor);
-  return actor;
+  result->Submit(init_method_name, init_args_data);
+  result->Start(actor, executor);
+  return result;
 }
 
 std::string Context::Get(const std::shared_ptr<Future>& future) {
