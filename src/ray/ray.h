@@ -8,8 +8,6 @@
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
 
-#include "util.h"
-
 using ActorExecutor = std::function<std::string(void*, const std::string&, const std::string&, bool* error_happened)>;
 
 class Future;
@@ -52,7 +50,7 @@ class Future {
 public:
   Future() { mu_.Lock(); }
   std::string data() {
-    FastMutexLock lock(&mu_);
+    absl::MutexLock lock(&mu_);
     return data_;
   }
   void set_ready(std::string value) {

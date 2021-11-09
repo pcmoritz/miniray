@@ -2,8 +2,6 @@
 
 #include <iterator>
 
-#include "util.h"
-
 void Actor::Start(void* actor, ActorExecutor executor) {
   absl::MutexLock lock(&mu_);
   actor_ = actor;
@@ -19,7 +17,7 @@ std::shared_ptr<Future> Actor::Submit(std::string& method_name, std::string& arg
   auto result = std::make_shared<Future>();
   Task task {std::move(method_name), std::move(arg_data), result};
   {
-    FastMutexLock lock(&mu_);
+    absl::MutexLock lock(&mu_);
     queue_.emplace_back(std::move(task));
   }
   return result;
@@ -30,7 +28,11 @@ bool Actor::ExecuteTasks(const ActorExecutor& executor) {
   // Wait until new task is available and get the task
   std::deque<Task> tasks;
   {
-    FastMutexLock lock(&mu_);
+    auto task_available = [this]() {
+      mu_.AssertReaderHeld();
+      return !queue_.empty();
+    };
+    absl::MutexLock lock(&mu_, absl::Condition(&task_available));
     std::swap(tasks, queue_);
   }
   // Now execute the tasks without holding the lock

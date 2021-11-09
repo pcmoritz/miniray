@@ -11,6 +11,7 @@ from libcpp.memory cimport shared_ptr
 
 import cloudpickle
 
+
 cdef class FastPickler:
     cdef bytes result
     cdef object pickler
@@ -43,7 +44,7 @@ cdef c_string actor_method(Actor actor, const c_string& method_name, const c_str
         return cloudpickle.dumps(err)
 
 cdef c_string call_actor_method(void* actor, const c_string& method_name, const c_string& arg_data, c_bool* error_happened) nogil:
-   with gil:
+    with gil:
         return actor_method(<Actor>actor, method_name, arg_data, error_happened)
 
 cdef extern from "src/ray/ray.h" nogil:
