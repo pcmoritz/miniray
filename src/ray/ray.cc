@@ -37,12 +37,12 @@ bool Actor::ExecuteTasks(const ActorExecutor& executor) {
   }
   // Now execute the tasks without holding the lock
   for (auto& task : tasks) {
-    if (task.method_name == "__shutdown__") {
-      return true;
-    }
     bool error_happened = false;
     std::string result = executor(actor_, task.method_name, task.args_data, &error_happened);
     task.result->set_ready(std::move(result));
+    if (task.method_name == "__shutdown__") {
+      return true;
+    }
   }
   return false;
 }
