@@ -2,7 +2,7 @@ from functools import wraps
 import inspect
 import weakref
 
-import _ray
+import ray._ray as _ray
 
 _global_context = _ray.context()
 
