@@ -7,63 +7,85 @@
 from libcpp cimport bool as c_bool, nullptr
 from libc.stdint cimport int64_t
 from libcpp.string cimport string as c_string
+from libcpp.vector cimport vector as c_vector
 from libcpp.memory cimport shared_ptr
 
+from cpython.buffer cimport Py_buffer
 from cpython.ref cimport Py_INCREF, Py_DECREF
 
 import cloudpickle
+import pickle
 import sys
-
-cdef class FastPickler:
-    cdef bytes result
-    cdef object pickler
-
-    def __init__(self):
-        self.result = b""
-        self.pickler = cloudpickle.CloudPickler(self, protocol=5)
-
-    def write(self, data):
-        self.result = data
-
-def dumps(data):
-    cdef FastPickler pickler = FastPickler()
-    pickler.pickler.dump(data)
-    return pickler.result
-
-
-cdef c_string actor_method(ActorData actor, const c_string& method_name, const c_string& arg_data, c_bool* error_happened):
-    try:
-        if method_name == b"__init__":
-            args, kwargs = cloudpickle.loads(arg_data)
-            actor.instance = actor.python_class(*args, **kwargs)
-            return b""
-        elif method_name == b"__shutdown__":
-            # Deallocate the Actor container here
-            Py_DECREF(actor)
-            return b""
-        else:
-            args, kwargs = cloudpickle.loads(arg_data)
-            result = getattr(actor.instance, method_name.decode())(*args, **kwargs)
-            return dumps(result)
-    except Exception as err:
-        error_happened[0] = True
-        return cloudpickle.dumps(err)
-
-cdef c_string call_actor_method(void* actor, const c_string& method_name, const c_string& arg_data, c_bool* error_happened) nogil:
-    with gil:
-        return actor_method(<ActorData>actor, method_name, arg_data, error_happened)
 
 cdef extern from "src/ray/ray.h" nogil:
     cdef cppclass CFuture" Future":
-        pass
+        CSerializedObject data()
 
     cdef cppclass CActor" Actor":
-        shared_ptr[CFuture] Submit(c_string& method_name, c_string& arg_data)
+        shared_ptr[CFuture] Submit(c_string& method_name, CSerializedObject serialized_args)
+
+    cdef cppclass CSerializedObject" SerializedObject":
+        CSerializedObject()
+        c_string data
+        c_vector[shared_ptr[CActor]] handles
 
     cdef cppclass CContext" Context":
         CContext()
-        shared_ptr[CActor] MakeActor(void*, c_string (void*, c_string&, const c_string &, c_bool* error_happened) nogil, c_string init_args_data)
-        c_string Get(const shared_ptr[CFuture]& future)
+        shared_ptr[CActor] MakeActor(void*, CSerializedObject (void*, c_string&, CSerializedObject, c_bool* error_happened) nogil, CSerializedObject serialized_init_args)
+
+cdef class Serializer:
+    cdef bytes data
+    cdef object buffers
+
+    def __init__(self, object):
+        self.data = b""
+        self.buffers = []
+        cloudpickle.CloudPickler(
+            self, protocol=5, buffer_callback=self.buffers.append).dump(object)
+
+    def write(self, data):
+        self.data = data
+
+cdef CSerializedObject serialize(value):
+    # TODO: Support arbitrary buffers
+    cdef Serializer serializer = Serializer(value)
+    cdef CSerializedObject result
+    cdef ActorHandle handle
+    result.data = serializer.data
+    for buffer in serializer.buffers:
+        handle = buffer.raw().obj
+        result.handles.push_back(handle.actor)
+    return result
+
+cdef deserialize(CSerializedObject object):
+    buffers = []
+    cdef shared_ptr[CActor] handle
+    for handle in object.handles:
+        buffers.append(pickle.PickleBuffer(make_actor_handle(handle)))
+    return cloudpickle.loads(object.data, buffers=buffers)
+
+
+cdef CSerializedObject actor_method(ActorData actor, const c_string& method_name, CSerializedObject serialized_args, c_bool* error_happened):
+    if method_name == b"__shutdown__":
+        # Deallocate the Actor container here
+        Py_DECREF(actor)
+        return CSerializedObject()
+    try:
+        # TODO: Move serialized_args
+        args, kwargs = deserialize(serialized_args)
+        if method_name == b"__init__":
+            actor.instance = actor.python_class(*args, **kwargs)
+            return CSerializedObject()
+        else:
+            result = getattr(actor.instance, method_name.decode())(*args, **kwargs)
+            return serialize(result)
+    except Exception as err:
+        error_happened[0] = True
+        return serialize(err)
+
+cdef CSerializedObject call_actor_method(void* actor, const c_string& method_name, CSerializedObject serialized_args, c_bool* error_happened) nogil:
+    with gil:
+        return actor_method(<ActorData>actor, method_name, serialized_args, error_happened)
 
 cdef class Future:
     cdef:
@@ -83,17 +105,31 @@ cdef class ActorData:
         self.instance = None
         self.python_class = python_class
 
+def _actor_handle_from_buffer(buffer):
+    return buffer.raw().obj
+
 cdef class ActorHandle:
     cdef:
         shared_ptr[CActor] actor
         object __weakref__
 
     def submit(self, c_string method_name, args, kwargs):
-        cdef c_string args_data = dumps([args, kwargs])
+        cdef CSerializedObject serialized_args = serialize([args, kwargs])
         cdef shared_ptr[CFuture] future
         with nogil:
-             future = self.actor.get().Submit(method_name, args_data)
+             future = self.actor.get().Submit(method_name, serialized_args)
         return make_future(future)
+
+    def __getbuffer__(self, Py_buffer *buffer, int flags):
+        buffer.obj = self
+        buffer.readonly = 0
+
+    def __releasebuffer__(self, Py_buffer *buffer):
+        pass
+
+    def __reduce_ex__(self, protocol):
+        if protocol >= 5:
+          return _actor_handle_from_buffer, (pickle.PickleBuffer(self),), None
 
 cdef make_actor_handle(shared_ptr[CActor] actor):
     cdef ActorHandle result = ActorHandle()
@@ -105,19 +141,19 @@ cdef class Context:
         shared_ptr[CContext] context
 
     def make_actor(self, python_class, args, kwargs):
-        cdef c_string init_args_data = cloudpickle.dumps([args, kwargs])
+        cdef CSerializedObject serialized_init_args = serialize([args, kwargs])
         cdef shared_ptr[CActor] actor
         cdef ActorData actor_data = ActorData(python_class)
         Py_INCREF(actor_data)
         with nogil:
-            actor = self.context.get().MakeActor(<void*>actor_data, call_actor_method, init_args_data)
+            actor = self.context.get().MakeActor(<void*>actor_data, call_actor_method, serialized_init_args)
         return make_actor_handle(actor)
 
     def get(self, Future future):
-        cdef c_string data
+        cdef CSerializedObject data
         with nogil:
-            data = self.context.get().Get(future.future)
-        return cloudpickle.loads(data)
+            data = future.future.get().data()
+        return deserialize(data)
 
 
 def context():

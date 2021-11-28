@@ -8,22 +8,29 @@
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
 
-using ActorExecutor = std::function<std::string(void*, const std::string&, const std::string&, bool* error_happened)>;
-
+class Actor;
 class Future;
+
+struct SerializedObject {
+  std::string data;
+  std::vector<std::shared_ptr<Actor>> handles;
+};
+
+using ActorExecutor = std::function<SerializedObject(void*, const std::string&, SerializedObject, bool* error_happened)>;
 
 struct Task {
   std::string method_name;
-  // Pickled collection of (args, kwargs)
-  std::string args_data;
+  // Serialized object of arguments
+  SerializedObject serialized_args;
   // Result of the computation
   std::shared_ptr<Future> result;
 };
 
 class Actor {
 public:
+  Actor() {};
   void Start(void* actor, ActorExecutor executor);
-  std::shared_ptr<Future> Submit(std::string& method_name, std::string& arg_data);
+  std::shared_ptr<Future> Submit(std::string& method_name, SerializedObject serialized_args);
   ~Actor();
 
 private:
@@ -48,26 +55,27 @@ private:
 // future is not reachable any more.
 class Future {
 public:
-  Future() { mu_.Lock(); }
-  std::string data() {
-    absl::MutexLock lock(&mu_);
+  explicit Future() : ready_(false) {}
+  SerializedObject data() {
+    absl::MutexLock lock(&mu_, absl::Condition(&ready_));
     return data_;
   }
-  void set_ready(std::string value) {
-    mu_.AssertHeld();
-    data_ = std::move(value);
-    mu_.Unlock();
+  void set_ready(SerializedObject value) {
+    absl::MutexLock lock(&mu_);
+    data_ = value;
+    ready_ = true;
   }
+  ~Future();
 private:
-  // This mutex is locked while the future is not yet ready
+  // Protect the state of this future
   mutable absl::Mutex mu_;
+  // Indicate whether the future is ready
+  bool ready_ GUARDED_BY(mu_);
   // Data for the result of this future after it is ready
-  std::string data_ GUARDED_BY(mu_);
+  SerializedObject data_ GUARDED_BY(mu_);
 };
 
 class Context {
 public:
-  Context() {};
-  std::shared_ptr<Actor> MakeActor(void* actor, ActorExecutor executor, std::string init_args_data);
-  std::string Get(const std::shared_ptr<Future>& future);
+  std::shared_ptr<Actor> MakeActor(void* actor, ActorExecutor executor, SerializedObject serialized_init_args);
 };

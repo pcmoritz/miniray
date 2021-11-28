@@ -13,12 +13,11 @@ void Actor::Start(void* actor, ActorExecutor executor) {
   });
 }
 
-std::shared_ptr<Future> Actor::Submit(std::string& method_name, std::string& arg_data) {
+std::shared_ptr<Future> Actor::Submit(std::string& method_name, SerializedObject serialized_args) {
   auto result = std::make_shared<Future>();
-  Task task {std::move(method_name), std::move(arg_data), result};
   {
     absl::MutexLock lock(&mu_);
-    queue_.emplace_back(std::move(task));
+    queue_.emplace_back(Task({method_name, std::move(serialized_args), result}));
   }
   return result;
 }
@@ -38,8 +37,8 @@ bool Actor::ExecuteTasks(const ActorExecutor& executor) {
   // Now execute the tasks without holding the lock
   for (auto& task : tasks) {
     bool error_happened = false;
-    std::string result = executor(actor_, task.method_name, task.args_data, &error_happened);
-    task.result->set_ready(std::move(result));
+    SerializedObject result = executor(actor_, task.method_name, task.serialized_args, &error_happened);
+    task.result->set_ready(result);
     if (task.method_name == "__shutdown__") {
       return true;
     }
@@ -50,19 +49,17 @@ bool Actor::ExecuteTasks(const ActorExecutor& executor) {
 Actor::~Actor() {
   // Shut down the actor by sending a message to shut down and joining the thread.
   std::string shutdown_method_name = "__shutdown__";
-  std::string shutdown_args_data;
-  Submit(shutdown_method_name, shutdown_args_data);
+  Submit(shutdown_method_name, SerializedObject());
   thread_.join();
 }
 
-std::shared_ptr<Actor> Context::MakeActor(void* actor, ActorExecutor executor, std::string init_args_data) {
-  auto result = std::make_shared<Actor>();
-  std::string init_method_name = "__init__";
-  result->Submit(init_method_name, init_args_data);
-  result->Start(actor, executor);
-  return result;
+Future::~Future() {
 }
 
-std::string Context::Get(const std::shared_ptr<Future>& future) {
-  return future->data();
+std::shared_ptr<Actor> Context::MakeActor(void* actor, ActorExecutor executor, SerializedObject serialized_init_args) {
+  auto result = std::make_shared<Actor>();
+  std::string init_method_name = "__init__";
+  result->Submit(init_method_name, std::move(serialized_init_args));
+  result->Start(actor, executor);
+  return result;
 }

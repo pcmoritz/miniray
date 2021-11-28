@@ -1,3 +1,14 @@
 build --action_env=PATH
-build --compilation_mode=opt
-# build --compilation_mode=dbg
+# build --compilation_mode=opt
+build --compilation_mode=dbg
+build --strip=never
+# build --copt -fsanitize=address
+# build --copt -DADDRESS_SANITIZER
+# build --copt -fno-omit-frame-pointer
+# build --copt -static-libsan
+# build --linkopt -fsanitize=address
+# build --linkopt -static-libsan
+# build --copt -fsanitize=thread
+# build --copt -DTHREAD_SANITIZER
+# build --copt -fno-omit-frame-pointer
+# build --linkopt -fsanitize=thread

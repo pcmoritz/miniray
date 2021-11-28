@@ -13,25 +13,43 @@ class ActorMethod:
     def __init__(self, name, actor, method):
         self._name = name
         self._actor = weakref.ref(actor)
-        @wraps(method)
         def remote_method_call(*args, **kwargs):
             return self._actor().submit(self._name, args, kwargs)
+        for attr, value in method.items():
+            setattr(remote_method_call, attr, value)
         self.remote = remote_method_call
 
 class ActorHandle:
-    def __init__(self, actor, modified_class):
+    def __init__(self, actor, actor_methods):
         self._actor = actor
-        actor_methods = inspect.getmembers(modified_class, is_function_or_method)
-        for name, method in actor_methods:
+        self._actor_methods = actor_methods
+
+        for name, method in self._actor_methods.items():
             setattr(self, name, ActorMethod(name, self._actor, method))
+
+    def __reduce_ex__(self, protocol):
+        return type(self), (self._actor, self._actor_methods), None
 
 class ActorClass:
     def __init__(self, modified_class):
         self._modified_class = modified_class
 
+    def options(self):
+        raise NotImplemented("Not yet implemented")
+
     def remote(self, *args, **kwargs):
         actor = _global_context.make_actor(self._modified_class, args, kwargs)
-        return ActorHandle(actor, self._modified_class)
+        actor_methods = {}
+        for name, method in inspect.getmembers(self._modified_class, is_function_or_method):
+            actor_methods[name] = {}
+            for attr in ["__module__", "__name__", "__qualname__", "__doc__", "__annotations__"]:
+                try:
+                    value = getattr(method, attr)
+                except AttributeError:
+                    pass
+                else:
+                    actor_methods[name][attr] = value
+        return ActorHandle(actor, actor_methods)
 
 
 def make_decorator():
@@ -50,6 +68,9 @@ def remote(*args, **kwargs):
         raise ValueError("Decorator with arguments currently not supported!")
 
 def get(futures):
+    if isinstance(futures, _ray.Future):
+        return _global_context.get(futures)
+
     results = []
     for future in futures:
         results.append(_global_context.get(future))
