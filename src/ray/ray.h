@@ -14,9 +14,10 @@ class Future;
 struct SerializedObject {
   std::string data;
   std::vector<std::shared_ptr<Actor>> handles;
+  bool error = false;
 };
 
-using ActorExecutor = std::function<SerializedObject(void*, const std::string&, SerializedObject, bool* error_happened)>;
+using ActorExecutor = std::function<SerializedObject(void*, const std::string&, SerializedObject)>;
 
 struct Task {
   std::string method_name;
@@ -36,16 +37,18 @@ public:
 private:
   bool ExecuteTasks(const ActorExecutor& executor);
 
-  // Mutex to protect the state of this actor.
+  // Mutex to protect the state of this actor
   mutable absl::Mutex mu_;
   // Storage that the language implementation can use to store
   // state correspoinding to the actor (e.g. the PyObject* of
-  // the object backing the actor).
+  // the object backing the actor)
   void* actor_;
-  // Thread running this actor.
+  // Thread running this actor
   std::thread thread_ GUARDED_BY(mu_);
-  // Task queue for this actor.
+  // Task queue for this actor
   std::deque<Task> queue_ GUARDED_BY(mu_);
+  // Possible error returned by actor's constructor
+  SerializedObject init_result_;
 };
 
 // Proxy for a result from an actor call. These are typically

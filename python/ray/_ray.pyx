@@ -28,10 +28,11 @@ cdef extern from "src/ray/ray.h" nogil:
         CSerializedObject()
         c_string data
         c_vector[shared_ptr[CActor]] handles
+        c_bool error
 
     cdef cppclass CContext" Context":
         CContext()
-        shared_ptr[CActor] MakeActor(void*, CSerializedObject (void*, c_string&, CSerializedObject, c_bool* error_happened) nogil, CSerializedObject serialized_init_args)
+        shared_ptr[CActor] MakeActor(void*, CSerializedObject (void*, c_string&, CSerializedObject) nogil, CSerializedObject serialized_init_args)
 
 cdef class Serializer:
     cdef bytes data
@@ -46,7 +47,7 @@ cdef class Serializer:
     def write(self, data):
         self.data = data
 
-cdef CSerializedObject serialize(value):
+cdef CSerializedObject serialize(value, error=False):
     # TODO: Support arbitrary buffers
     cdef Serializer serializer = Serializer(value)
     cdef CSerializedObject result
@@ -55,6 +56,7 @@ cdef CSerializedObject serialize(value):
     for buffer in serializer.buffers:
         handle = buffer.raw().obj
         result.handles.push_back(handle.actor)
+    result.error = error
     return result
 
 cdef deserialize(CSerializedObject object):
@@ -62,10 +64,14 @@ cdef deserialize(CSerializedObject object):
     cdef shared_ptr[CActor] handle
     for handle in object.handles:
         buffers.append(pickle.PickleBuffer(make_actor_handle(handle)))
-    return cloudpickle.loads(object.data, buffers=buffers)
+    result = cloudpickle.loads(object.data, buffers=buffers)
+    if object.error:
+        raise result
+    else:
+        return result
 
 
-cdef CSerializedObject actor_method(ActorData actor, const c_string& method_name, CSerializedObject serialized_args, c_bool* error_happened):
+cdef CSerializedObject actor_method(ActorData actor, const c_string& method_name, CSerializedObject serialized_args):
     if method_name == b"__shutdown__":
         # Deallocate the Actor container here
         Py_DECREF(actor)
@@ -80,12 +86,11 @@ cdef CSerializedObject actor_method(ActorData actor, const c_string& method_name
             result = getattr(actor.instance, method_name.decode())(*args, **kwargs)
             return serialize(result)
     except Exception as err:
-        error_happened[0] = True
-        return serialize(err)
+        return serialize(err, error=True)
 
-cdef CSerializedObject call_actor_method(void* actor, const c_string& method_name, CSerializedObject serialized_args, c_bool* error_happened) nogil:
+cdef CSerializedObject call_actor_method(void* actor, const c_string& method_name, CSerializedObject serialized_args) nogil:
     with gil:
-        return actor_method(<ActorData>actor, method_name, serialized_args, error_happened)
+        return actor_method(<ActorData>actor, method_name, serialized_args)
 
 cdef class Future:
     cdef:

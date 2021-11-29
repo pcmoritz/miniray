@@ -36,10 +36,14 @@ bool Actor::ExecuteTasks(const ActorExecutor& executor) {
   }
   // Now execute the tasks without holding the lock
   for (auto& task : tasks) {
-    bool error_happened = false;
-    SerializedObject result = executor(actor_, task.method_name, task.serialized_args, &error_happened);
+    // If the actor creation task failed, propagate the error
+    SerializedObject result =
+      init_result_.error ? init_result_ :
+      executor(actor_, task.method_name, task.serialized_args);
     task.result->set_ready(result);
-    if (task.method_name == "__shutdown__") {
+    if (task.method_name == "__init__") {
+      init_result_ = result;
+    } else if (task.method_name == "__shutdown__") {
       return true;
     }
   }
