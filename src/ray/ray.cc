@@ -67,3 +67,27 @@ std::shared_ptr<Actor> Context::MakeActor(void* actor, ActorExecutor executor, S
   result->Start(actor, executor);
   return result;
 }
+
+std::shared_ptr<Actor> Context::GetActor(std::string name, std::string* metadata) {
+  absl::MutexLock lock(&mu_);
+  auto it = named_actors_.find(name);
+  if (it != named_actors_.end()) {
+    if (metadata) {
+      *metadata = it->second.metadata;
+    }
+    return it->second.actor;
+  }
+  return nullptr;
+}
+
+bool Context::SetActor(std::string name, std::shared_ptr<Actor> actor, std::string metadata) {
+  absl::MutexLock lock(&mu_);
+  auto it = named_actors_.find(name);
+  if (it == named_actors_.end()) {
+    named_actors_[name].actor = actor;
+    named_actors_[name].metadata = metadata;
+    return true;
+  } else {
+    return false;
+  }
+}

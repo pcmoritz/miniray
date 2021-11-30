@@ -78,7 +78,19 @@ private:
   SerializedObject data_ GUARDED_BY(mu_);
 };
 
+struct ActorInfo {
+  std::shared_ptr<Actor> actor;
+  std::string metadata;
+};
+
 class Context {
 public:
   std::shared_ptr<Actor> MakeActor(void* actor, ActorExecutor executor, SerializedObject serialized_init_args);
+  std::shared_ptr<Actor> GetActor(std::string name, std::string* metadata=nullptr);
+  bool SetActor(std::string name, std::shared_ptr<Actor> actor, std::string metadata="");
+private:
+  // Protect the state of the context
+  mutable absl::Mutex mu_;
+  // Registry of named actors
+  absl::flat_hash_map<std::string, ActorInfo> named_actors_ GUARDED_BY(mu_);
 };

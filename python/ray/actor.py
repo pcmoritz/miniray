@@ -1,5 +1,6 @@
 from functools import wraps
 import inspect
+import cloudpickle
 import weakref
 
 import ray._ray as _ray
@@ -8,6 +9,19 @@ _global_context = _ray.context()
 
 def is_function_or_method(obj):
     return inspect.isfunction(obj) or inspect.ismethod(obj)
+
+def get_actor_methods(modified_class):
+    actor_methods = {}
+    for name, method in inspect.getmembers(modified_class, is_function_or_method):
+        actor_methods[name] = {}
+        for attr in ["__module__", "__name__", "__qualname__", "__doc__", "__annotations__"]:
+            try:
+                value = getattr(method, attr)
+            except AttributeError:
+                pass
+            else:
+                actor_methods[name][attr] = value
+    return actor_methods
 
 class ActorMethod:
     def __init__(self, name, actor, method):
@@ -34,21 +48,33 @@ class ActorClass:
     def __init__(self, modified_class):
         self._modified_class = modified_class
 
-    def options(self):
-        raise NotImplemented("Not yet implemented")
+    def options(self, name=None, namespace=None):
+
+        actor_cls = self
+
+        class ActorOptionWrapper:
+            def remote(self, *args, **kwargs):
+                return actor_cls._remote(
+                    args=args,
+                    kwargs=kwargs,
+                    name=name,
+                    namespace=namespace,
+                )
+
+        return ActorOptionWrapper()
 
     def remote(self, *args, **kwargs):
-        actor = _global_context.make_actor(self._modified_class, args, kwargs)
-        actor_methods = {}
-        for name, method in inspect.getmembers(self._modified_class, is_function_or_method):
-            actor_methods[name] = {}
-            for attr in ["__module__", "__name__", "__qualname__", "__doc__", "__annotations__"]:
-                try:
-                    value = getattr(method, attr)
-                except AttributeError:
-                    pass
-                else:
-                    actor_methods[name][attr] = value
+        return self._remote(args=args, kwargs=kwargs)
+
+    def _remote(self,
+                args=None,
+                kwargs=None,
+                name=None,
+                namespace=None):
+        actor_methods = get_actor_methods(self._modified_class)
+        metadata = cloudpickle.dumps(actor_methods)
+        actor = _global_context.make_actor(
+            self._modified_class, args, kwargs, name or "", namespace or "", metadata)
         return ActorHandle(actor, actor_methods)
 
 
@@ -75,3 +101,8 @@ def get(futures):
     for future in futures:
         results.append(_global_context.get(future))
     return results
+
+def get_actor(name, namespace=None):
+    actor, metadata = _global_context.get_actor(name, namespace or "")
+    actor_methods = cloudpickle.loads(metadata)
+    return ActorHandle(actor, actor_methods)

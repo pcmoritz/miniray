@@ -33,6 +33,8 @@ cdef extern from "src/ray/ray.h" nogil:
     cdef cppclass CContext" Context":
         CContext()
         shared_ptr[CActor] MakeActor(void*, CSerializedObject (void*, c_string&, CSerializedObject) nogil, CSerializedObject serialized_init_args)
+        shared_ptr[CActor] GetActor(c_string name, c_string* metadata)
+        c_bool SetActor(c_string name, shared_ptr[CActor] actor, c_string metadata)
 
 cdef class Serializer:
     cdef bytes data
@@ -145,14 +147,30 @@ cdef class Context:
     cdef:
         shared_ptr[CContext] context
 
-    def make_actor(self, python_class, args, kwargs):
+    def make_actor(self, python_class, args, kwargs, c_string name, c_string namespace, c_string metadata):
         cdef CSerializedObject serialized_init_args = serialize([args, kwargs])
         cdef shared_ptr[CActor] actor
         cdef ActorData actor_data = ActorData(python_class)
+        cdef c_string actor_name = namespace + b"/" + name
         Py_INCREF(actor_data)
         with nogil:
             actor = self.context.get().MakeActor(<void*>actor_data, call_actor_method, serialized_init_args)
+        if name != b"":
+            # TODO: Do status checking if it already exists
+            self.context.get().SetActor(actor_name, actor, metadata)
         return make_actor_handle(actor)
+
+    def get_actor(self, c_string name, c_string namespace):
+        cdef c_string actor_name = namespace + b"/" + name
+        cdef shared_ptr[CActor] actor
+        cdef c_string metadata
+        with nogil:
+            actor = self.context.get().GetActor(actor_name, &metadata)
+        if not actor:
+            raise ValueError("Failed to look up actor with name '{}'.".format(actor_name))
+        else:
+            return make_actor_handle(actor), metadata
+
 
     def get(self, Future future):
         cdef CSerializedObject data
